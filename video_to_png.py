@@ -58,8 +58,11 @@ class VideoToPNG:
         
         # 计算起始和结束帧
         start_frame = int(start_time * video_fps)
-        end_frame = int(end_time * video_fps) if end_time else total_frames
-        end_frame = min(end_frame, total_frames)
+        if end_time:
+            # 确保包含结束时间的那一帧
+            end_frame = min(int(end_time * video_fps) + 1, total_frames)
+        else:
+            end_frame = total_frames
         
         # 设置起始位置
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -80,7 +83,7 @@ class VideoToPNG:
         try:
             while True:
                 ret, frame = cap.read()
-                if not ret or cap.get(cv2.CAP_PROP_POS_FRAMES) > end_frame:
+                if not ret or cap.get(cv2.CAP_PROP_POS_FRAMES) - 1 >= end_frame:
                     break
                 
                 current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES)) - 1
@@ -118,9 +121,72 @@ class VideoToPNG:
         if not cap.isOpened():
             return None
 
+        # 获取基本信息
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
-        duration = total_frames / fps if fps > 0 else 0
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        # 多种方法计算时长，选择最准确的
+        duration_methods = []
+
+        # 方法1: 直接从属性获取（毫秒）
+        cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0)  # 设置到视频结尾
+        duration_ms_end = cap.get(cv2.CAP_PROP_POS_MSEC)
+        if duration_ms_end > 0:
+            duration_methods.append(duration_ms_end / 1000.0)
+
+        # 方法2: 使用帧数/帧率
+        if fps > 0 and total_frames > 0:
+            duration_frames = total_frames / fps
+            duration_methods.append(duration_frames)
+
+        # 方法3: 尝试获取视频总时长（某些OpenCV版本支持）
+        try:
+            # 跳转到最后一帧来获取准确时长
+            cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames - 1)
+            ret, _ = cap.read()
+            if ret:
+                last_frame_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                if last_frame_time > 0:
+                    duration_methods.append(last_frame_time)
+        except Exception:
+            pass
+
+        # 重置视频到开始
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        # 选择最大的时长值（通常更准确）
+        duration = max(duration_methods) if duration_methods else 0
+
+        # 如果所有方法都失败，尝试手动计算
+        if duration <= 0 and fps > 0:
+            # 通过实际读取帧来估算
+            frame_count = 0
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+            # 采样计算，避免读取全部帧
+            sample_frames = min(300, total_frames)  # 最多采样300帧
+            step = max(1, total_frames // sample_frames)
+
+            last_timestamp = 0
+            for i in range(0, total_frames, step):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
+                ret, _ = cap.read()
+                if ret:
+                    timestamp = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                    if timestamp > last_timestamp:
+                        last_timestamp = timestamp
+                        frame_count += 1
+                else:
+                    break
+
+                # 限制采样数量
+                if frame_count >= sample_frames:
+                    break
+
+            if last_timestamp > 0:
+                duration = last_timestamp
 
         # 获取文件大小
         file_size = os.path.getsize(video_path)
@@ -130,11 +196,13 @@ class VideoToPNG:
             'filename': os.path.basename(video_path),
             'total_frames': total_frames,
             'fps': fps,
-            'width': int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-            'height': int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            'width': width,
+            'height': height,
             'duration': duration,
-            'size_mb': size_mb
+            'size_mb': size_mb,
+            'duration_methods': duration_methods,  # 调试信息
         }
+
         cap.release()
         return info
 

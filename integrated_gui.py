@@ -507,6 +507,8 @@ class IntegratedGUI(QMainWindow):
 
         try:
             info = self.video_converter.get_video_info(video_path)
+
+            # 基本信息
             info_text = f"""视频信息：
 文件: {info.get('filename', 'N/A')}
 时长: {info.get('duration', 'N/A'):.2f}秒
@@ -514,6 +516,16 @@ class IntegratedGUI(QMainWindow):
 总帧数: {info.get('total_frames', 'N/A')}
 分辨率: {info.get('width', 'N/A')}x{info.get('height', 'N/A')}
 文件大小: {info.get('size_mb', 'N/A'):.2f} MB"""
+
+            # 如果有多种时长计算方法，显示调试信息
+            duration_methods = info.get('duration_methods', [])
+            if len(duration_methods) > 1:
+                info_text += f"""
+
+时长计算调试信息：
+• 检测到 {len(duration_methods)} 种计算方法
+• 计算结果: {', '.join([f'{d:.2f}s' for d in duration_methods])}
+• 选择最大值: {max(duration_methods):.2f}s (通常最准确)"""
 
             self.video_status.setPlainText(info_text)
 
