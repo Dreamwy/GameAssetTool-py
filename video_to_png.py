@@ -45,16 +45,30 @@ class VideoToPNG:
         if not cap.isOpened():
             raise ValueError(f"无法打开视频文件: {video_path}")
         
-        # 获取视频信息
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        video_fps = cap.get(cv2.CAP_PROP_FPS)
-        video_duration = total_frames / video_fps
+        # 获取视频信息（使用改进的帧率检测）
+        video_info = self.get_video_info(video_path)
+        if not video_info:
+            raise ValueError(f"无法获取视频信息: {video_path}")
+        
+        total_frames = video_info['total_frames']
+        video_fps = video_info['fps']
+        video_duration = video_info['duration']
         
         print(f"视频信息:")
         print(f"  文件: {video_path}")
         print(f"  总帧数: {total_frames}")
         print(f"  帧率: {video_fps:.2f} FPS")
         print(f"  时长: {video_duration:.2f} 秒")
+        
+        # 显示帧率检测详情
+        fps_methods = video_info.get('fps_methods', [])
+        fps_reported = video_info.get('fps_reported', 0)
+        if fps_methods:
+            print(f"  帧率检测详情:")
+            print(f"    OpenCV原始报告: {fps_reported:.2f} FPS")
+            for method, value in fps_methods:
+                status = " ✓" if abs(value - video_fps) < 0.01 else ""
+                print(f"    {method}: {value:.2f} FPS{status}")
         
         # 计算起始和结束帧
         start_frame = int(start_time * video_fps)
@@ -123,70 +137,103 @@ class VideoToPNG:
 
         # 获取基本信息
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps_reported = cap.get(cv2.CAP_PROP_FPS)  # OpenCV报告的帧率
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        # 多种方法计算时长，选择最准确的
+        # 多种方法计算帧率，选择最准确的
+        fps_methods = []
         duration_methods = []
 
-        # 方法1: 直接从属性获取（毫秒）
+        # 方法1: OpenCV直接报告的帧率
+        if fps_reported > 0:
+            fps_methods.append(("OpenCV报告", fps_reported))
+
+        # 方法2: 通过时长计算真实帧率
+        # 先获取准确的视频时长
         cap.set(cv2.CAP_PROP_POS_AVI_RATIO, 1.0)  # 设置到视频结尾
         duration_ms_end = cap.get(cv2.CAP_PROP_POS_MSEC)
         if duration_ms_end > 0:
-            duration_methods.append(duration_ms_end / 1000.0)
+            duration_seconds = duration_ms_end / 1000.0
+            duration_methods.append(duration_seconds)
+            if total_frames > 0:
+                calculated_fps = total_frames / duration_seconds
+                fps_methods.append(("时长计算", calculated_fps))
 
-        # 方法2: 使用帧数/帧率
-        if fps > 0 and total_frames > 0:
-            duration_frames = total_frames / fps
-            duration_methods.append(duration_frames)
-
-        # 方法3: 尝试获取视频总时长（某些OpenCV版本支持）
+        # 方法3: 通过最后一帧的时间戳计算
         try:
-            # 跳转到最后一帧来获取准确时长
             cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames - 1)
             ret, _ = cap.read()
             if ret:
                 last_frame_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
                 if last_frame_time > 0:
                     duration_methods.append(last_frame_time)
+                    if total_frames > 0:
+                        calculated_fps = total_frames / last_frame_time
+                        fps_methods.append(("最后帧计算", calculated_fps))
+        except Exception:
+            pass
+
+        # 方法4: 通过实际帧间隔计算（采样方式）
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            sample_size = min(100, total_frames // 10)  # 采样帧数
+            if sample_size > 10:
+                timestamps = []
+                for i in range(sample_size):
+                    frame_pos = i * (total_frames // sample_size)
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_pos)
+                    ret, _ = cap.read()
+                    if ret:
+                        timestamp = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+                        if timestamp > 0:
+                            timestamps.append((frame_pos, timestamp))
+                
+                # 计算平均帧率
+                if len(timestamps) > 1:
+                    frame_intervals = []
+                    for i in range(1, len(timestamps)):
+                        frame_diff = timestamps[i][0] - timestamps[i-1][0]
+                        time_diff = timestamps[i][1] - timestamps[i-1][1]
+                        if time_diff > 0:
+                            interval_fps = frame_diff / time_diff
+                            frame_intervals.append(interval_fps)
+                    
+                    if frame_intervals:
+                        avg_fps = sum(frame_intervals) / len(frame_intervals)
+                        fps_methods.append(("采样计算", avg_fps))
         except Exception:
             pass
 
         # 重置视频到开始
         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
-        # 选择最大的时长值（通常更准确）
-        duration = max(duration_methods) if duration_methods else 0
+        # 选择最可靠的帧率值
+        # 优先选择采样计算和时长计算的结果，因为它们通常更准确
+        fps = fps_reported  # 默认值
+        fps_debug_info = []
+        
+        if fps_methods:
+            # 记录所有方法的结果用于调试
+            fps_debug_info = [(method, value) for method, value in fps_methods]
+            
+            # 选择最可靠的帧率：
+            # 1. 如果有采样计算的结果，优先使用
+            # 2. 否则使用时长计算的结果
+            # 3. 最后才使用OpenCV报告的帧率
+            for method, value in fps_methods:
+                if method in ["采样计算", "时长计算", "最后帧计算"]:
+                    # 检查是否合理（1-120 FPS范围内）
+                    if 1.0 <= value <= 120.0:
+                        fps = value
+                        break
+
+        # 选择最准确的时长
+        duration = max(duration_methods) if duration_methods else (total_frames / fps if fps > 0 else 0)
 
         # 如果所有方法都失败，尝试手动计算
         if duration <= 0 and fps > 0:
-            # 通过实际读取帧来估算
-            frame_count = 0
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-            # 采样计算，避免读取全部帧
-            sample_frames = min(300, total_frames)  # 最多采样300帧
-            step = max(1, total_frames // sample_frames)
-
-            last_timestamp = 0
-            for i in range(0, total_frames, step):
-                cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-                ret, _ = cap.read()
-                if ret:
-                    timestamp = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
-                    if timestamp > last_timestamp:
-                        last_timestamp = timestamp
-                        frame_count += 1
-                else:
-                    break
-
-                # 限制采样数量
-                if frame_count >= sample_frames:
-                    break
-
-            if last_timestamp > 0:
-                duration = last_timestamp
+            duration = total_frames / fps
 
         # 获取文件大小
         file_size = os.path.getsize(video_path)
@@ -201,6 +248,8 @@ class VideoToPNG:
             'duration': duration,
             'size_mb': size_mb,
             'duration_methods': duration_methods,  # 调试信息
+            'fps_methods': fps_debug_info,  # 帧率调试信息
+            'fps_reported': fps_reported,  # OpenCV原始报告的帧率
         }
 
         cap.release()

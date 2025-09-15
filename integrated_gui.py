@@ -517,6 +517,25 @@ class IntegratedGUI(QMainWindow):
 分辨率: {info.get('width', 'N/A')}x{info.get('height', 'N/A')}
 文件大小: {info.get('size_mb', 'N/A'):.2f} MB"""
 
+            # 显示帧率调试信息
+            fps_methods = info.get('fps_methods', [])
+            fps_reported = info.get('fps_reported', 0)
+            
+            if fps_methods:
+                info_text += f"""
+
+帧率检测调试信息：
+• OpenCV原始报告: {fps_reported:.2f} FPS
+• 检测到 {len(fps_methods)} 种计算方法："""
+                
+                for method, value in fps_methods:
+                    status = "✓ 已采用" if abs(value - info.get('fps', 0)) < 0.01 else ""
+                    info_text += f"""
+  - {method}: {value:.2f} FPS {status}"""
+                
+                info_text += f"""
+• 最终选择: {info.get('fps', 'N/A'):.2f} FPS"""
+
             # 如果有多种时长计算方法，显示调试信息
             duration_methods = info.get('duration_methods', [])
             if len(duration_methods) > 1:
